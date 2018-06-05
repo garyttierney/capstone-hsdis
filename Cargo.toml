@@ -1,0 +1,10 @@
+[package]
+name = "capstone-hsdis"
+version = "0.1.0"
+authors = ["gtierney"]
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+capstone = "0.4.0"
