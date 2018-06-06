@@ -6,5 +6,6 @@ authors = ["gtierney"]
 [lib]
 crate-type = ["dylib"]
 
-[dependencies]
-capstone = "0.4.0"
+[dependencies.capstone]
+version = "0.4.0"
+features = ["build_capstone_cc"]
