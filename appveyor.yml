@@ -47,6 +47,20 @@ branches:
     - /^v\d+\.\d+\.\d+.*$/
     - master
 
+before_deploy:
+  - cargo rustc --target %TARGET% --release -- -C lto
+  - ps: ci\before_deploy.ps1
+
+deploy:
+  artifact: /.*\.zip/
+  auth_token:
+    secure: $env:GH_DEPLOY_TOKEN
+  description: ''
+  on:
+    RUST_VERSION: stable
+    appveyor_repo_tag: true
+  provider: GitHub
+
 notifications:
   - provider: Email
     on_build_success: false

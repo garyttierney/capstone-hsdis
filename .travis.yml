@@ -72,6 +72,20 @@ branches:
     - /^v\d+\.\d+\.\d+.*$/
     - master
 
+before_deploy:
+  - sh ci/before_deploy.sh
+
+deploy:
+  api_key:
+    secure: $GH_DEPLOY_TOKEN
+  file_glob: true
+  file: $CRATE_NAME-$TRAVIS_TAG-$TARGET.*
+  on:
+    condition: $TRAVIS_RUST_VERSION = stable
+    tags: true
+  provider: releases
+  skip_cleanup: true
+
 notifications:
   email:
     on_success: never
