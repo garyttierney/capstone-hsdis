@@ -9,7 +9,7 @@ New-Item -Type Directory -Name $STAGE
 Set-Location $STAGE
 
 $ZIP = "$SRC_DIR\$($Env:CRATE_NAME)-$($Env:APPVEYOR_REPO_TAG_NAME)-$($Env:TARGET).zip"
-Copy-Item "$SRC_DIR\target\$($Env:TARGET)\release\libcapstone_hsdis.so" '.\'
+Copy-Item "$SRC_DIR\target\$($Env:TARGET)\release\libcapstone_hsdis.dll" '.\'
 
 7z a "$ZIP" *
 
