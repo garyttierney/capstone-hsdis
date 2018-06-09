@@ -20,7 +20,7 @@ main() {
     test -f Cargo.lock || cargo generate-lockfile
 
     cross rustc --target $TARGET --release -- -C lto
-    cp target/$TARGET/release/libcapstone_hsdis.so $stage/
+    cp target/$TARGET/release/libcapstone_hsdis.* $stage/
 
     cd $stage
     tar czf $src/$CRATE_NAME-$TRAVIS_TAG-$TARGET.tar.gz *
