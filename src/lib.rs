@@ -18,23 +18,31 @@ pub extern "C" fn decode_instructions(
     print_callback_data: *const c_void,
     _options: *const c_char,
 ) {
-    let address = start as u64;
+    let address = start as usize;
     let data_len = end as usize - start as usize;
     let data = unsafe { slice::from_raw_parts(start, data_len) };
 
-    let decoder = decoder::InstructionDecoder::default();
-    let mut reporter = reporter::InstructionReporter {
-        print_callback,
-        print_callback_data,
-        event_callback,
-        event_callback_data,
-    };
+    let mach = arch::MachineDescriptor::current();
+    if mach.is_none() {
+        return;
+    }
 
-    let decode_result = decoder.decode(address, data, &mut reporter);
-    if decode_result.is_err() {
-        eprintln!(
-            "Error occurred during decoding: {}",
-            decode_result.unwrap_err()
-        );
+    let mach = mach.unwrap();
+    let decoder_result = decoder::InstructionDecoder::new(mach);
+
+    match decoder_result {
+        Err(e) => println!("Unable to create instruction decoder: {}", e),
+        Ok(mut decoder) => {
+            let mut reporter = reporter::InstructionReporter {
+                print_callback,
+                print_callback_data,
+                event_callback,
+                event_callback_data,
+            };
+
+            decoder
+                .decode(address, data, &mut reporter)
+                .unwrap_or_else(|e| println!("Error occurred during decoding: {}", e));
+        }
     }
 }

@@ -1,22 +1,35 @@
 use capstone::{Insn, InsnDetail};
-use std::ffi::CString;
+use std::error;
+use std::ffi;
+use std::fmt;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
 
 use arch::MachineDescriptor;
 use decoder::InstructionVisitor;
+use decoder::InstructionVisitorError;
 
 type OpaquePtr = *const c_void;
 type CharPtr = *const c_char;
 
 pub type PrintCallback = extern "C" fn(output: OpaquePtr, format: CharPtr, ...);
-pub type EventCallback = extern "C" fn(output: OpaquePtr, event: CharPtr, data: OpaquePtr);
+pub type EventCallback = extern "C" fn(output: OpaquePtr, event: CharPtr, data: OpaquePtr) -> usize;
 
-pub enum InstructionReporterEvent {
-    Begin(u64),
-    BeginInstruction(u64),
-    EndInstruction(u64),
-    End(u64),
+/// A HotSpot disassembler event.
+enum Event {
+    /// Denotes the beginning of disassembly at the given address.
+    Begin(usize),
+
+    /// Denotes the beginning of an instruction being decoded at the given address.
+    BeginInstruction(usize),
+
+    /// Denotes the end of an instruction being decoded with its end address.
+    EndInstruction(usize),
+
+    /// Denotes that disassembly has completed at the given address.
+    End(usize),
+
+    /// Denotes that disassembly is being done for the given machine.
     MachineInfo(MachineDescriptor),
 }
 
@@ -33,78 +46,161 @@ const END_INSN_KEY: &str = "/insn";
 const END_KEY: &str = "/insns";
 const MACH_INFO_KEY: &str = "mach name='%s'/";
 
-impl InstructionReporter {
-    pub fn handle_event(&mut self, event: InstructionReporterEvent) {
-        use self::InstructionReporterEvent::*;
+trait EventData: Sized {
+    fn get_ptr(&self) -> *const c_void;
+}
 
-        match event {
-            Begin(addr) => self.event_at_addr(BEGIN_KEY, addr),
-            BeginInstruction(addr) => self.event_at_addr(BEGIN_INSN_KEY, addr),
-            EndInstruction(addr) => self.event_at_addr(END_INSN_KEY, addr),
-            End(addr) => self.event_at_addr(END_KEY, addr),
-            MachineInfo(mach) => self.event(MACH_INFO_KEY, mach.to_string()),
-        }
-    }
-
-    fn print<S>(&mut self, data: S)
-    where
-        S: Into<Vec<u8>>,
-    {
-        let data_cstr = CString::new(data.into()).expect("Unable to allocate c-strign");
-
-        (self.print_callback)(self.print_callback_data, data_cstr.as_ptr());
-    }
-
-    fn event_at_addr<S>(&mut self, data: S, address: u64)
-    where
-        S: Into<Vec<u8>>,
-    {
-        let name_cstr = CString::new(data.into()).unwrap();
-
-        (self.event_callback)(
-            self.event_callback_data,
-            name_cstr.as_ptr(),
-            address as *const c_void,
-        );
-    }
-
-    fn event<E, D>(&mut self, event: E, data: D)
-    where
-        E: Into<Vec<u8>>,
-        D: Into<Vec<u8>>,
-    {
-        let event_cstr = CString::new(event.into()).unwrap();
-        let data_cstr = CString::new(data.into()).unwrap();
-
-        (self.event_callback)(
-            self.event_callback_data,
-            event_cstr.as_ptr(),
-            data_cstr.as_ptr() as *const c_void,
-        );
+impl EventData for ffi::CString {
+    fn get_ptr(&self) -> *const c_void {
+        self.as_ptr() as *const c_void
     }
 }
 
-impl InstructionVisitor for InstructionReporter {
-    fn visit_begin(&mut self, machine: MachineDescriptor, addr: u64) {
-        self.handle_event(InstructionReporterEvent::Begin(addr));
-        self.handle_event(InstructionReporterEvent::MachineInfo(machine));
+impl EventData for usize {
+    fn get_ptr(&self) -> *const c_void {
+        *self as *const c_void
+    }
+}
+
+impl ToString for Event {
+    fn to_string(&self) -> String {
+        use self::Event::*;
+
+        let key = match *self {
+            Begin(_) => BEGIN_KEY,
+            BeginInstruction(_) => BEGIN_INSN_KEY,
+            EndInstruction(_) => END_INSN_KEY,
+            End(_) => END_KEY,
+            MachineInfo(_) => MACH_INFO_KEY,
+        };
+
+        String::from(key)
+    }
+}
+
+#[derive(Debug)]
+pub enum InstructionReporterError {
+    FfiParametersError(ffi::NulError),
+}
+
+#[doc(hidden)]
+impl From<ffi::NulError> for InstructionReporterError {
+    fn from(err: ffi::NulError) -> Self {
+        InstructionReporterError::FfiParametersError(err)
+    }
+}
+
+impl InstructionVisitorError for InstructionReporterError {}
+
+#[doc(hidden)]
+impl error::Error for InstructionReporterError {
+    fn description(&self) -> &str {
+        match *self {
+            InstructionReporterError::FfiParametersError(ref err) => err.description(),
+        }
     }
 
-    fn visit_end(&mut self, addr: u64) {
-        self.handle_event(InstructionReporterEvent::End(addr))
+    fn cause(&self) -> Option<&error::Error> {
+        match *self {
+            InstructionReporterError::FfiParametersError(ref err) => Some(err),
+        }
+    }
+}
+#[doc(hidden)]
+impl fmt::Display for InstructionReporterError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match *self {
+            InstructionReporterError::FfiParametersError(ref err) => {
+                write!(f, "FFI call error: {}", err)
+            }
+        }
+    }
+}
+
+impl InstructionReporter {
+    fn handle_event(&mut self, event: Event) -> Result<bool, InstructionReporterError> {
+        use self::Event::*;
+
+        let event_key = event.to_string();
+        let result = match event {
+            Begin(addr) | BeginInstruction(addr) | EndInstruction(addr) | End(addr) => {
+                self.report_event(event_key, addr)
+            }
+            MachineInfo(mach) => {
+                self.report_event(event_key, ffi::CString::new(mach.to_string()).unwrap())
+            }
+        };
+
+        result.map_err(|e| e.into())
     }
 
-    fn visit_instruction(&mut self, instruction: &Insn, _detail: InsnDetail) {
-        use self::InstructionReporterEvent::*;
+    /// Report a message back to the HotSpot dissassembler to print to the compiler log.
+    fn print<S>(&mut self, data: S) -> Result<(), ffi::NulError>
+    where
+        S: Into<Vec<u8>>,
+    {
+        let data_cstr = ffi::CString::new(data.into())?;
 
-        self.handle_event(BeginInstruction(instruction.address()));
+        Ok((self.print_callback)(
+            self.print_callback_data,
+            data_cstr.as_ptr(),
+        ))
+    }
 
-        if let (Some(mnemonic), Some(operands)) = (instruction.mnemonic(), instruction.op_str()) {
-            self.print(format!("{} {}", mnemonic, operands));
+    /// Report a disassembly event to the HotSpot disassembler.
+    fn report_event<S, D>(&mut self, key: S, data: D) -> Result<bool, ffi::NulError>
+    where
+        S: Into<Vec<u8>>,
+        D: EventData,
+    {
+        let event = ffi::CString::new(key.into())?;
+        let data = data.get_ptr();
+        let result = (self.event_callback)(self.event_callback_data, event.as_ptr(), data);
+
+        Ok(result != 0)
+    }
+}
+
+impl InstructionVisitor<InstructionReporterError> for InstructionReporter {
+    fn visit_begin(
+        &mut self,
+        machine: MachineDescriptor,
+        addr: usize,
+    ) -> Result<(), InstructionReporterError> {
+        self.handle_event(Event::Begin(addr))?;
+        self.handle_event(Event::MachineInfo(machine))?;
+
+        Ok(())
+    }
+
+    fn visit_end(&mut self, addr: usize) -> Result<(), InstructionReporterError> {
+        self.handle_event(Event::End(addr))?;
+
+        Ok(())
+    }
+
+    fn visit_instruction(
+        &mut self,
+        instruction: &Insn,
+        _detail: InsnDetail,
+    ) -> Result<(), InstructionReporterError> {
+        let instruction_start = instruction.address() as usize;
+        let instruction_end = instruction_start + instruction.bytes().len();
+
+        self.handle_event(Event::BeginInstruction(instruction_start))?;
+
+        if let Some(mnemonic) = instruction.mnemonic() {
+            let mut disassembly = mnemonic.to_string();
+
+            if let Some(operands_disassembly) = instruction.op_str() {
+                disassembly = format!("{} {}", disassembly, operands_disassembly);
+            }
+
+            self.print(disassembly)?;
         }
 
-        self.handle_event(EndInstruction(
-            instruction.address() + (instruction.bytes().len()) as u64,
-        ));
+        self.handle_event(Event::EndInstruction(instruction_end))?;
+
+        Ok(())
     }
 }
